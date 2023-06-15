@@ -1,0 +1,11 @@
+loguru
+aiohttp
+aiohttp_socks
+python-arango
+alive_progress
+bs4
+fake_useragent
+dateparser
+pandas
+scikit-learn
+lxml
