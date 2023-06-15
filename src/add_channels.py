@@ -8,7 +8,7 @@ from component.arangoconnector.connector import ArangoConnector
 
 async def run():
     arango = ArangoConnector()
-    conf = vx.open('/home/woopmd/Projects/NEWS/urls.csv')
+    conf = vx.open('urls.csv')
     urls = conf.url.values.tolist()
     rss_link = conf.rss.values.tolist()
 
