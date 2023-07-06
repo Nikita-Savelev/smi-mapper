@@ -36,7 +36,8 @@ async def buf_proceses(cpu_id, shm_name):
 
 async def start_collector(cpu_id, shm_name, shm_alive_bar_name):
     async def collect(np, channel, shm_alive_bar_name):
-        connector = ProxyConnector.from_url('socks5://127.0.0.1:9050')
+        # connector = ProxyConnector.from_url('socks5://127.0.0.1:9050')
+        connector = ProxyConnector.from_url('http://T5WZFf:MZKsVh@5.101.84.150:8000')
         async with aiohttp.ClientSession(headers=HEADERS, connector=connector) as s:
             if "rss_link" in channel:
                 for rss_link in channel['rss_link']:
