@@ -1,0 +1,33 @@
+image: docker:latest
+services:
+  - name: docker:dind
+variables:
+    IMAGE_NAME: $CI_PROJECT_NAME
+    KUBE_NAMESPACE: "default"
+    KUBE_REPLICAS: 1
+    FULL_IMAGE_NAME: "cr.yandex/crpldv9lna47m4aidsjv/python/$IMAGE_NAME:$CI_PIPELINE_IID" 
+
+stages:
+  - build
+  - deploy
+  
+build-docker:
+  stage: build
+  before_script:
+    - sleep 5
+    - cat $yc_key | docker login --username json_key --password-stdin cr.yandex
+  script:
+    - docker build --pull -t $FULL_IMAGE_NAME . -f Dockerfile
+    - docker push $FULL_IMAGE_NAME 
+
+deploy-docker:
+  stage: deploy
+  when: manual
+  image: "registry.gitlab.com/gitlab-org/cluster-integration/auto-deploy-image"
+  #when: manual
+  before_script:
+    - sleep 5
+    - apk add docker && rm -rf /var/cache/apk/*
+    - cat $yc_key | docker login --username json_key --password-stdin cr.yandex
+  script:
+    - sed -e "s/{{NAMESPACE}}/$KUBE_NAMESPACE/g" -e "s/{{REPLICAS}}/$KUBE_REPLICAS/g" -e "s~{{IMAGE}}~$FULL_IMAGE_NAME~g" smi-mapper.yaml | kubectl apply -f -
