@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smi-mapper
+  namespace: {{NAMESPACE}}
+spec:
+  replicas: {{REPLICAS}}
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: smi-mapper
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 100%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: smi-mapper
+    spec:
+      containers:
+      - name: smi-collector
+        image: {{IMAGE}}
+        imagePullPolicy: Always
