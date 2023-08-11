@@ -20,6 +20,6 @@ spec:
         app: smi-mapper
     spec:
       containers:
-      - name: smi-collector
+      - name: smi-mapper
         image: {{IMAGE}}
         imagePullPolicy: Always
