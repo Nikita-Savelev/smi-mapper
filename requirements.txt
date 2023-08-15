@@ -8,3 +8,4 @@ fake_useragent
 dateparser
 pandas
 lxml
+scippy
