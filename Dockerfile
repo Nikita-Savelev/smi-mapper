@@ -7,7 +7,8 @@ WORKDIR /usr/project
 COPY . .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install -U dateparser
-RUN pip show scikit-learn
+RUN pip install -U scikit-learn=0.22.2.post1
+RUN pip  scikit-learn
 RUN chmod +x /usr/project/run_flow.sh
 ENV PORT=5000
 
