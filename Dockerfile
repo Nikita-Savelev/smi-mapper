@@ -7,7 +7,7 @@ WORKDIR /usr/project
 COPY . .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install -U dateparser
-RUN pip install Cython==0.28.5
+RUN apt install Cython
 RUN pip install scikit-learn==0.22.2.post1
 RUN chmod +x /usr/project/run_flow.sh
 ENV PORT=5000
