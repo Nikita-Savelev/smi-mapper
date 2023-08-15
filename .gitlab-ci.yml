@@ -12,7 +12,7 @@ stages:
   - build
   - deploy
   
-build-smi-poducer:
+build-smi-mapper:
   stage: build
   before_script:
     - sleep 5
@@ -21,7 +21,7 @@ build-smi-poducer:
     - docker build --pull -t $FULL_IMAGE_NAME . -f Dockerfile
     - docker push $FULL_IMAGE_NAME 
 
-deploy-smi-poducer:
+deploy-smi-mapper:
   stage: deploy
   when: manual
   image: "registry.gitlab.com/gitlab-org/cluster-integration/auto-deploy-image"
