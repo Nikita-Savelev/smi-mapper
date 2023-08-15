@@ -2,7 +2,7 @@ FROM python:3.9
 
 RUN apt-get update
 RUN apt-get install tor -y
-RUN apt-get install cython3 -y
+RUN apt-get install cython_0.29.2 -y
 RUN /usr/local/bin/python -m pip install --upgrade pip
 WORKDIR /usr/project
 COPY . .
