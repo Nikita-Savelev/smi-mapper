@@ -10,3 +10,4 @@ pandas
 scikit-learn==0.22.2.post1
 lxml
 aiofiles
+Pillow
