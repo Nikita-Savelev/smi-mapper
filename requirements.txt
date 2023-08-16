@@ -1,6 +1,7 @@
 loguru
 aiohttp
 aiohttp_socks
+aiofiles
 python-arango
 alive_progress
 bs4
