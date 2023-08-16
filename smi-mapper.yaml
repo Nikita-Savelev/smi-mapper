@@ -23,4 +23,15 @@ spec:
       - name: {{PROJECT_NAME}}
         image: {{IMAGE}}
         imagePullPolicy: Always
+        volumeMounts: 
+          - name: smi-config-vol
+            mountPath: /usr/project/src/config/config.ini
+            subPath: config.ini
       restartPolicy: Always
+      volumes:
+        - name: smi-config-vol
+          configMap:
+            name: smi-config-mapper
+            items: 
+              - key: config.ini
+                path: config.ini
