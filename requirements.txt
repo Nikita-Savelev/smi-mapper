@@ -10,4 +10,4 @@ dateparser
 pandas
 lxml
 scipy
-PIL
+Pillow
