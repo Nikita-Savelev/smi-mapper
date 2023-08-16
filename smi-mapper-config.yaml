@@ -1,0 +1,20 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: smi-config-mapper
+data: 
+  config.ini: |
+    [NewsCollector]
+    mode = auto
+    semaphore = 4
+
+    [NewsParser]
+    semaphore = 4
+
+    [Arango]
+    arangoURL = http://158.160.42.54:8529
+    username = root
+    password = infoprofile
+    db_name = infoprofile
+    collection_channels_name = test_channel
+    collection_proxy_name = smi_proxy
