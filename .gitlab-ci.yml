@@ -31,6 +31,6 @@ deploy-smi-mapper:
     - apk add docker && rm -rf /var/cache/apk/*
     - cat $yc_key | docker login --username json_key --password-stdin cr.yandex
   script:
-    - kubectl apply -f smi-config-mapper.yaml
+    - kubectl apply -f smi-mapper-config.yaml
     - sed -e "s/{{NAMESPACE}}/$KUBE_NAMESPACE/g" -e "s/{{REPLICAS}}/$KUBE_REPLICAS/g" -e "s/{{PROJECT_NAME}}/$IMAGE_NAME/g" -e "s~{{IMAGE}}~$FULL_IMAGE_NAME~g" "${IMAGE_NAME}".yaml | kubectl apply -f -
 
