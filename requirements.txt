@@ -1,13 +1,12 @@
 loguru
 aiohttp
 aiohttp_socks
-aiofiles
 python-arango
 alive_progress
 bs4
 fake_useragent
 dateparser
 pandas
+scikit-learn==0.22.2.post1
 lxml
-scipy
-Pillow
+aiofiles
