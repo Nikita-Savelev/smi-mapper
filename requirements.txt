@@ -10,3 +10,4 @@ dateparser
 pandas
 lxml
 scipy
+PIL
