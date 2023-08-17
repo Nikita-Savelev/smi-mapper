@@ -93,9 +93,8 @@ async def create_map_for_parser(channel, report, items_data, parser_mapper):
 async def main(cpu_id, shm_name):
     time.sleep(cpu_id)
     while True:
+        logger.info(f'Get channels cpu_id={cpu_id}')
         channels, proxy_pool, arango_conn = await buf_proceses(cpu_id, shm_name)
-        if not channels:
-            break
         collector_mapper = NewsCollector()
         parser_mapper = NewsParser()
         for channel in channels:
@@ -126,8 +125,7 @@ if __name__ == "__main__":
     shm = shared_memory.SharedMemory(create=True, size=1)
     buffer = shm.buf
     buffer[0] = 0
-    proceses = 1 # os.cpu_count() - 2
+    proceses = os.cpu_count() - 2
     np = ArangoConnector()
-    print(f"All channels = {np.count_channels[0]}")
     with Pool(proceses) as pool:
         pool.map(run, [(cpu_id, shm.name) for cpu_id in range(1, proceses + 1)])
