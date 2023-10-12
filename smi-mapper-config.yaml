@@ -2,6 +2,7 @@ kind: ConfigMap
 apiVersion: v1
 metadata:
   name: smi-config-mapper
+  namespace: dataspace
 data: 
   config.ini: |
     [NewsCollector]
