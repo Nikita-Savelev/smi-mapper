@@ -17,5 +17,5 @@ data:
     username = root
     password = infoprofile
     db_name = infoprofile
-    collection_channels_name = test_channel
+    collection_channels_name = tmp_channels
     collection_proxy_name = smi_proxy
