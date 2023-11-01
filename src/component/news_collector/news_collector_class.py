@@ -187,7 +187,7 @@ class NewsCollector:
         return best_link["best_url"] if best_link["max_len"] > 4 else None
 
 
-    async def start_collector_map_assembly_process(self, report, channel, link):
+    async def start_collector_map_assembly_process(self, report, channel, link, unittest=False):
         if not link:
             rss = await self.find_rss_process(channel["connection_mode"], channel)
             if rss:
@@ -198,6 +198,8 @@ class NewsCollector:
                 report["rss"] = False
                 channel, report["collector"], connect_error = await self.get_collect_map(channel, channel["connection_mode"])
                 if connect_error:
+                    if unittest:
+                        return False
                     self.logger.warning(f'FAILED find collect_elements on {channel["url"]}')
                     report["failed_log"] = "FAILED find collect_elements"
                     report["status"] = 2
@@ -206,6 +208,8 @@ class NewsCollector:
             if "collect_url" in channel and channel['collect_url']:
                 items = await self.get_items_pid55(channel["connection_mode"], channel['collect_url'], channel['collect_elements'])
             else:
+                if unittest:
+                    return False
                 self.logger.warning(f'FAILED find collect_url {channel["url"]}')
                 report["failed_log"] = "FAILED find collect_url"
                 report["status"] = 3
@@ -214,6 +218,8 @@ class NewsCollector:
             items, rss_link = await self.get_data_rss_pid4(channel["connection_mode"], link, headers=channel["headers"] if "headers" in channel else None, return_rss_link=True)
             channel["rss_link"] = [rss_link]
         if not items:
+            if unittest:
+                return False
             self.logger.warning(f'FAILED collect items on {channel["url"]}')
             report["failed_log"] = "FAILED collect items"
             report["status"] = 3
@@ -230,10 +236,14 @@ class NewsCollector:
                     all_links.append(data["link"])
                     new_data.append(data)
         if len(new_data) < 5:
+            if unittest:
+                return False
             self.logger.warning(f'FAILED collected news on {channel["url"]} {len(new_data)}')
             report["failed_log"] = f"FAILED collect news ({len(new_data)})"
             report["status"] = 3
             return channel, report, None
+        if unittest:
+            return True
         return channel, report, new_data
 
 

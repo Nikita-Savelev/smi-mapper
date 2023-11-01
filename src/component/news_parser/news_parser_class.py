@@ -727,9 +727,11 @@ def clear_dubl_content(items):
 
 
 class NewsParser:
-    async def start_parser_map_assembly_process(self, new_data, report, channel):
+    async def start_parser_map_assembly_process(self, new_data, report, channel, unittest=False):
         data = await asyncio.gather(*[determinant_news_element.fetch_all_elements(newdata, channel["connection_mode"], 0) for newdata in new_data])
         if (len(del_none(data)) * 2) < len(data) or len(del_none(data)) < 5:
+            if unittest:
+                return False
             logger.warning(
                 f"FAILED connect to news (all news = {len(data)}, successfully connection = {len(del_none(data))})")
             report[
@@ -742,6 +744,8 @@ class NewsParser:
                                                                                                           count_all_items,
                                                                                                           channel["connection_mode"])
         if not final_data_channel:
+            if unittest:
+                return False
             logger.warning(f"FAILED find news_elements on {channel['url']}")
             report["failed_log"] = f"FAILED find news_elements"
             report["status"] = 5
@@ -762,6 +766,8 @@ class NewsParser:
         #     return channel, report
         logger.info(f"SUCCESSFULLY create map on {channel['url']}")
         report["status"] = 1
+        if unittest:
+            return True
         return channel, report
 
     async def parse_news_pid50(self, newdata, connection_mode):

@@ -1,7 +1,9 @@
 import time as tm
 from arango import ArangoClient
 from configparser import ConfigParser
-
+import component.metrics as metrics
+import requests
+import os
 
 def get_plug():
     return {
@@ -98,8 +100,8 @@ class ArangoConnector:
 
     def update_chanel(self, channel, report):
         if 'status' not in report or report["status"] != 1:
-            channel["status"] = 3
-            plug = get_plug()
+            channel["map_assembly_status"] = 3
+            # plug = get_plug()
             # if "trash_items" not in channel:
             #     channel["trash_items"] = plug['trash_items']
             # if "collect_elements" not in channel:
@@ -107,14 +109,20 @@ class ArangoConnector:
             # if "news_elements" not in channel:
             #     channel["news_elements"] = plug['news_elements']
         else:
-            channel["status"] = 1
+            channel["map_assembly_status"] = 1
+            try:
+                PORT = int(os.getenv("PORT"))
+            except:
+                PORT = 5035
+            requests.get(f"http://0.0.0.0:{PORT}/inc_successfully")
+
         channel["report"] = report
         self.collection_channels.update(channel)
 
     def get_count_channels(self):
         ret = self.aql_execute(f'FOR doc IN {self.collection_channels_name} '
                                f'FILTER doc.active '
-                               f'AND doc.status == null '
+                               f'AND doc.map_assembly_status == null '
                                f'AND doc.trash_items == null '
                                f'COLLECT WITH count INTO _lengh '
                                f'RETURN _lengh')
@@ -123,12 +131,32 @@ class ArangoConnector:
     def get_news_channels(self, failed_channels=False):
         ret = self.aql_execute(f'LET arr = ((FOR doc IN {self.collection_channels_name} '
                                f'FILTER doc.active '
-                               f'AND doc.status == {"null" if not failed_channels else 3} '
+                               f'AND doc.map_assembly_status == {"null" if not failed_channels else 3} '
                                f'{"AND doc.trash_items == null " if not failed_channels else ""}'
                                f'LIMIT 4 '
                                f'RETURN doc)) '
                                f'FOR doc in arr '
-                               'UPDATE doc WITH {"status": 2} IN '
+                               'UPDATE doc WITH {"map_assembly_status": 2} IN '
                                f'{self.collection_channels_name} '
                                f'RETURN NEW')
         return ret
+
+    def liveness(self):
+        cursor = self.aql_execute('RETURN true')
+        ret = [doc for doc in cursor]
+        # config = ConfigParser()
+        # try:
+        #     config.read("config/config.ini")
+        #     shm = shared_memory.SharedMemory(config.get("Arango", "shm_proces_pul"))
+        # except:
+        #     config.read("src/config/config.ini")
+        #     shm = shared_memory.SharedMemory(config.get("Arango", "shm_proces_pul"))
+        # count_workers = int(shm.buf[0])
+        # metrics.health_checker.set({"healthcheck": "newsparser"}, count_workers)
+
+        if ret and ret[0]:
+            metrics.health_checker.set({"healthcheck": "arangodb"}, 2)
+            return True
+        else:
+            metrics.health_checker.set({"healthcheck": "arangodb"}, 0)
+            return False

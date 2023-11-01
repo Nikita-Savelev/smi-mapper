@@ -19,6 +19,9 @@ import random
 from aiohttp_socks import ProxyConnector
 from common import utils
 from loguru import logger
+import uvicorn.server
+import api
+import subprocess
 
 RSS_PATHS = ['feed', 'rss']
 
@@ -65,7 +68,11 @@ def get_connection_mode(channel, proxy_pool):
         return channel["connection_mode"]
     if not "report" in channel:
         return "default"
-    proxy_pool_filter = set(proxy_pool).difference(set(channel["report"]["used_connections"]))
+    try:
+        proxy_pool_filter = set(proxy_pool).difference(set(channel["report"]["used_connections"]))
+    except:
+        channel["report"]["used_connections"] = []
+        proxy_pool_filter = proxy_pool
     return list(proxy_pool_filter)[0] if proxy_pool_filter else "tor"
 
 async def create_map_for_collector(channel, collector_mapper, report):
@@ -121,11 +128,24 @@ def run(arrs):
     asyncio.run(main(process_id, shm_name))
 
 
+def api_startup():
+    uvicorn.main.logger = logger
+    uvicorn.server.logger = logger
+    try:
+        PORT = int(os.getenv("PORT"))
+    except:
+        PORT = 5035
+    logger.info(f"Web application attempt start on {PORT} port")
+    cmd = f"""cd src/; gunicorn --workers=2 -k uvicorn.workers.UvicornWorker --bind "0.0.0.0:{PORT}" api:app"""
+    subprocess.Popen(cmd, shell=True)
+    return True
+
 if __name__ == "__main__":
     shm = shared_memory.SharedMemory(create=True, size=1)
     buffer = shm.buf
     buffer[0] = 0
     proceses = os.cpu_count() - 2
     np = ArangoConnector()
+    api_startup()
     with Pool(proceses) as pool:
         pool.map(run, [(cpu_id, shm.name) for cpu_id in range(1, proceses + 1)])
