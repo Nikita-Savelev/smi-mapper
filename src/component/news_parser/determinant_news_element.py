@@ -270,7 +270,7 @@ def create_doc(clear, trash, item):
         'trash_indexes': {}
     }
     item['parser_id'] = 55
-    item['status'] = 1
+    item['map_assembly_status'] = 1
     item['dont_get_header_img'] = False
     item['split_br_tags'] = True
     item['breaker_items'] = {'breaker_el_list': [], 'breaker_re_strings': []}
