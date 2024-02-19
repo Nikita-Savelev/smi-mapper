@@ -5,6 +5,7 @@ python-arango
 alive_progress
 bs4
 fake_useragent
+sentry-sdk==1.40.4
 dateparser
 pandas
 scikit-learn
