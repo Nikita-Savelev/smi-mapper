@@ -6,6 +6,7 @@ alive_progress
 bs4
 fake_useragent
 sentry-sdk==1.40.4
+python-dotenv==1.0.1
 dateparser
 pandas
 scikit-learn

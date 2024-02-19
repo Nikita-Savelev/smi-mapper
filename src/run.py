@@ -22,11 +22,24 @@ from loguru import logger
 import uvicorn.server
 import api
 import subprocess
+
+from configparser import ConfigParser
 import sentry_sdk
-sentry_sdk.init(
-    dsn="https://b74c52888ac72c34f4ef141370c53397@o4506745820348416.ingest.sentry.io/4506752175374336",
-    traces_sample_rate=1.0,
-)
+from sentry_sdk import capture_message, capture_exception
+import os
+from dotenv import load_dotenv
+
+
+load_dotenv()
+if os.getenv('DEBUG') != True:
+    config = ConfigParser()
+    config.read("src/config/config.ini")
+    dsn = config["Sentry"]['dsn']
+    sentry_sdk.init(
+        dsn=dsn,
+        traces_sample_rate=1.0,
+        environment=os.getenv('ENVIRONMENT'),
+    )
 
 RSS_PATHS = ['feed', 'rss']
 
