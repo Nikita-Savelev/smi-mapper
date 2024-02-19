@@ -22,6 +22,11 @@ from loguru import logger
 import uvicorn.server
 import api
 import subprocess
+import sentry_sdk
+sentry_sdk.init(
+    dsn="https://b74c52888ac72c34f4ef141370c53397@o4506745820348416.ingest.sentry.io/4506752175374336",
+    traces_sample_rate=1.0,
+)
 
 RSS_PATHS = ['feed', 'rss']
 
