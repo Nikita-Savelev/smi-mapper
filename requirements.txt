@@ -14,3 +14,4 @@ lxml
 aiofiles
 Pillow
 html5lib
+aioprometheus==23.3.0
