@@ -78,68 +78,246 @@ class NewsCollector:
             return self.get_items_recursive(map["next"], all_els)
 
 
-    async def find_rss(self, url, connection_mode, channel):
+    @staticmethod
+    def _abs_url(base_url: str, href: str):
+        if not href or href.startswith("#") or href.lower().startswith("javascript:"):
+            return None
+        href = href.strip()
+        if href.startswith("//"):
+            return "https:" + href
+        if href.startswith("http://") or href.startswith("https://"):
+            return href
+        base = base_url.rstrip("/")
+        if href.startswith("/"):
+            # scheme://host
+            m = re.match(r"(https?://[^/]+)", base)
+            if not m:
+                return None
+            return m.group(1) + href
+        return f"{base}/{href.lstrip('/')}"
+
+    @staticmethod
+    def _same_site(url: str, site: str) -> bool:
+        host = re.sub(r"^https?://", "", url).split("/")[0].lower()
+        site = site.lower().lstrip(".")
+        if host == site or host == f"www.{site}":
+            return True
+        # соседние поддомены ленты, не CDN/assets
+        if host.endswith("." + site):
+            sub = host[: -len(site) - 1]
+            return bool(re.search(r"(^|[.-])(rss|feed|atom|news|www)([.-]|$)", sub))
+        return False
+
+    @staticmethod
+    def _feed_hint(href: str, text: str = "") -> bool:
+        if not href:
+            return False
+        if re.search(r"\.(css|js|mjs|png|jpe?g|gif|webp|svg|woff2?|ttf|ico)(?:$|\?)", href, flags=re.I):
+            return False
+        low = href.lower()
+        if "feedback" in low or "/auth" in low or "/kek/" in low:
+            return False
+        blob = f"{href} {text or ''}".lower()
+        keys = ("rss", "atom", "feed")
+        if any(k in blob for k in keys):
+            return True
+        return bool(re.search(r"[\./]xml(?:$|\?)", href, flags=re.I))
+
+    @staticmethod
+    def _candidate_score(url: str) -> int:
+        u = url.lower()
+        score = 0
+        if "feedback" in u or "/auth" in u or "/kek/" in u or "/page" in u:
+            return -1000
+        if re.search(r"/rss(?:\.xml)?(?:/|$|\?)", u) or re.search(r"[\./]rss(?:/|$|\?)", u):
+            score += 80
+        if "atom" in u:
+            score += 60
+        if re.search(r"\.xml(?:$|\?)", u):
+            score += 40
+        if re.search(r"/feed(?:/|$|\?)", u):
+            score += 15
+        if u.startswith("https://"):
+            score += 2
+        return score
+
+    async def _http_get(self, url, connection_mode, headers=None):
         timeout = aiohttp.ClientTimeout(total=60)
-        proxy, headers = get_connection_options(connection_mode, response_type=str)
+        proxy, default_headers = get_connection_options(connection_mode, response_type=str)
+        if not headers:
+            headers = default_headers
         try:
             async with aiohttp.request("get", url, headers=headers, timeout=timeout, proxy=proxy) as response:
+                status = response.status
+                content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
                 try:
-                    response = await response.text()
-                    soup = BeautifulSoup(response, 'lxml')
+                    body = await response.text()
                 except UnicodeDecodeError:
-                    soup = BeautifulSoup(await response.read(), 'lxml')
-                if "rss" not in url and "feed" not in url:
-                    links = [f'{url}/{link if not re.fullmatch(f"""(?:/|{channel["url"]})+.+""", link, flags=re.DOTALL) else str(utils.get_first_el(re.findall(f"""(?:/|{channel["url"]})+(.+)""", link, flags=re.DOTALL)))}' if not link.startswith('http') else link for link in [element.get("href") for element in soup.find_all(lambda el: "rss" in str(el.get("href")) or "feed" in str(el.get("href")))]]
-                    rss_links = await asyncio.gather(*[self.find_rss(link, connection_mode, channel) for link in links])
-                    if not rss_links:
-                        return {"url": url, "len": 0}
-                    best_link = {"best_url": None, "max_len": 0}
-                    for href in rss_links:
-                        if href["len"] > best_link["max_len"]:
-                            best_link["best_url"] = href["url"]
-                            best_link["max_len"] = href["len"]
-                    return {"url": best_link["best_url"], "len": best_link["max_len"]}
-                items = soup.find_all('item')
-                if not items:
-                    items = soup.find_all('entry')
-                items = utils.del_none([await self.create_docs_pid50(item, channel) for item in items])
-                return {"url": url, "len": len(items)}
-        except Exception as ex:
+                    body = (await response.read()).decode("utf-8", errors="ignore")
+                return status, content_type, body
+        except Exception:
             self.logger.warning(utils.get_exception())
+            return None, None, None
+
+    def _count_feed_items(self, body: str, content_type: str):
+        """Return (is_feed_like, item_count). Reject HTML stubs without feed nodes."""
+        if not body:
+            return False, 0
+        soup = BeautifulSoup(body, "lxml")
+        items = soup.find_all("item")
+        if not items:
+            items = soup.find_all("entry")
+        n = len(items)
+        ct = content_type or ""
+        has_feed_root = bool(soup.find("rss") or soup.find("feed") or soup.find("rdf:RDF") or soup.find("RDF"))
+        if n > 0:
+            return True, n
+        if "rss" in ct or "atom" in ct or ("xml" in ct and has_feed_root):
+            return True, 0
+        if soup.find("html") and not has_feed_root:
+            return False, 0
+        if has_feed_root:
+            return True, 0
+        return False, 0
+
+    async def probe_rss_url(self, url, connection_mode, site=None):
+        status, content_type, body = await self._http_get(url, connection_mode)
+        if status is None:
+            self.logger.info(
+                f'[map_feed] url={site or "-"} step=rss_probe feed={url} result=error'
+            )
             return None
+        is_feed, n = self._count_feed_items(body, content_type)
+        self.logger.info(
+            f'[map_feed] url={site or "-"} step=rss_probe feed={url} '
+            f'status={status} ctype={content_type or "-"} items={n} is_feed={is_feed}'
+        )
+        if not is_feed:
+            return {"url": url, "len": 0, "status": status, "content_type": content_type, "is_feed": False}
+        return {"url": url, "len": n, "status": status, "content_type": content_type, "is_feed": True}
 
+    def _extract_feed_links_from_soup(self, page_url: str, soup: BeautifulSoup, site: str):
+        found = []
+        for el in soup.find_all("link"):
+            rel = " ".join(el.get("rel") if isinstance(el.get("rel"), list) else [el.get("rel") or ""]).lower()
+            typ = (el.get("type") or "").lower()
+            href = el.get("href")
+            if "alternate" in rel and ("rss" in typ or "atom" in typ or "xml" in typ):
+                abs_u = self._abs_url(page_url, href)
+                if abs_u:
+                    found.append(abs_u)
+            elif self._feed_hint(href or "", ""):
+                abs_u = self._abs_url(page_url, href)
+                if abs_u:
+                    found.append(abs_u)
+        for el in soup.find_all("a"):
+            href = el.get("href")
+            text = el.get_text(" ", strip=True)[:80]
+            if self._feed_hint(href or "", text):
+                abs_u = self._abs_url(page_url, href)
+                if abs_u:
+                    found.append(abs_u)
+        # prefer same-site, keep order, dedupe
+        out = []
+        seen = set()
+        for u in found:
+            if u in seen:
+                continue
+            seen.add(u)
+            if site and not self._same_site(u, site):
+                continue
+            out.append(u)
+        return out
 
-    async def get_data_rss_pid4(self, connection_mode, rss_link, headers=None, return_rss_link=False):
+    async def crawl_feed_candidates(self, channel, connection_mode, max_depth=1):
+        site = channel["url"]
+        seeds = [f"https://{site}/", f"http://{site}/"]
+        candidates = []
+        seen_pages = set()
+        queue = [(u, 0) for u in seeds]
+        while queue:
+            page_url, depth = queue.pop(0)
+            if page_url in seen_pages:
+                continue
+            seen_pages.add(page_url)
+            status, content_type, body = await self._http_get(page_url, connection_mode)
+            if not body or status is None or status >= 400:
+                continue
+            soup = BeautifulSoup(body, "lxml")
+            links = self._extract_feed_links_from_soup(page_url, soup, site)
+            for link in links:
+                candidates.append(link)
+                # глубже только явные rss/atom-хабы, не HTML /feed/pageN
+                if (
+                    depth < max_depth
+                    and re.search(r"(rss|atom)(?:\.xml)?(?:/|$|\?)", link, flags=re.I)
+                    and "feedback" not in link.lower()
+                ):
+                    if link not in seen_pages:
+                        queue.append((link, depth + 1))
+        # dedupe preserve order
+        out, seen = [], set()
+        for u in candidates:
+            if u not in seen:
+                seen.add(u)
+                out.append(u)
+        self.logger.info(
+            f'[map_feed] url={site} step=rss_crawl pages={len(seen_pages)} candidates={len(out)}'
+        )
+        return out
+
+    async def find_rss(self, url, connection_mode, channel):
+        """Probe a single URL (kept for compatibility)."""
+        return await self.probe_rss_url(url, connection_mode, channel.get("url"))
+
+    async def get_data_rss_pid4(self, connection_mode, rss_link, headers=None, return_rss_link=False, site=None):
         ua = UserAgent()
         if not headers:
             headers = {'User-Agent': ua.chrome}
-        proxy, _ = get_connection_options(connection_mode, response_type=str)
-        timeout = aiohttp.ClientTimeout(total=60)
         rss_link = re.findall("http[^']+", rss_link)[0]
-        items = None
-        try:
-            async with aiohttp.request("get", rss_link, headers=headers, timeout=timeout, proxy=proxy) as response:
-                try:
-                    response = await response.text()
-                    soup = BeautifulSoup(response, 'lxml')
-                except UnicodeDecodeError:
-                    soup = BeautifulSoup(await response.read(), 'lxml')
-                items = soup.find_all('item')
-                if not items:
-                    items = soup.find_all('entry')
-                if not items:
-                    if rss_link.startswith("https"):
-                        new_rss_link = re.sub("https://", "http://", rss_link)
-                    elif rss_link.startswith("http://"):
-                        new_rss_link = re.sub("http://", "https://", rss_link)
-                    items = await self.get_data_rss_pid4(connection_mode, new_rss_link)
+        site = site or re.sub(r"^https?://", "", rss_link).split("/")[0]
+
+        async def _load(url):
+            status, content_type, body = await self._http_get(url, connection_mode, headers=headers)
+            if status is None:
+                return None, url, status, content_type
+            is_feed, n = self._count_feed_items(body or "", content_type or "")
+            self.logger.info(
+                f'[map_feed] url={site} step=rss_fetch feed={url} '
+                f'status={status} ctype={content_type or "-"} items={n} is_feed={is_feed}'
+            )
+            if not is_feed or n == 0 or not body:
+                return None, url, status, content_type
+            soup = BeautifulSoup(body, "lxml")
+            items = soup.find_all("item") or soup.find_all("entry")
+            return items, url, status, content_type
+
+        items, used, status, ctype = await _load(rss_link)
+        if not items:
+            # scheme mirror
+            if rss_link.startswith("https://"):
+                alt = "http://" + rss_link[len("https://"):]
+            elif rss_link.startswith("http://"):
+                alt = "https://" + rss_link[len("http://"):]
+            else:
+                alt = None
+            if alt:
+                items, used, status, ctype = await _load(alt)
+        if not items:
+            # 1–2 common alternate paths on same host
+            host = re.match(r"(https?://[^/]+)", used or rss_link)
+            if host:
+                base = host.group(1)
+                for path in ("/feed", "/rss.xml", "/atom.xml"):
+                    alt = base + path
+                    if alt.rstrip("/") == (used or rss_link).rstrip("/"):
+                        continue
+                    items, used, status, ctype = await _load(alt)
                     if items:
-                        rss_link = new_rss_link
-        except Exception:
-            utils.get_exception()
-        finally:
-            if return_rss_link: return items, rss_link
-            return items
+                        break
+        if return_rss_link:
+            return items, used if items else rss_link
+        return items
 
     async def get_items_pid55(self, connection_mode, link, collect_elements):
         proxy, headers = get_connection_options(connection_mode, response_type=str)
@@ -174,73 +352,199 @@ class NewsCollector:
         return channel, report, connect_error
 
     async def find_rss_process(self, connection_mode, channel):
-        links = [f"http://{channel['url']}", f"http://{channel['url']}/feed", f"http://{channel['url']}/rss", f"http://{channel['url']}/rss.xml",
-                 f"https://{channel['url']}", f"https://{channel['url']}/feed", f"https://{channel['url']}/rss", f"https://{channel['url']}/rss.xml"]
-        rss_links = utils.del_none(await asyncio.gather(*[self.find_rss(link, connection_mode, channel) for link in links]))
-        if not rss_links:
-            return None
-        best_link = {"best_url": None, "max_len": 0}
-        for href in rss_links:
-            if href["len"] > best_link["max_len"]:
-                best_link["best_url"] = href["url"]
-                best_link["max_len"] = href["len"]
-        return best_link["best_url"] if best_link["max_len"] > 4 else None
+        site = channel["url"]
+        static_paths = [
+            "/rss", "/feed", "/rss.xml", "/atom", "/atom.xml",
+            "/index.xml", "/feeds/posts/default", "/ru/rss", "/rss/news", "/news/rss",
+        ]
+        static = []
+        for scheme in ("https", "http"):
+            for path in static_paths:
+                static.append(f"{scheme}://{site}{path}")
+        crawled = []
+        try:
+            crawled = await self.crawl_feed_candidates(channel, connection_mode, max_depth=1)
+        except Exception:
+            self.logger.warning(utils.get_exception())
 
+        # crawl + typical paths; rank by feed-likeness so /rss не вытесняется HTML /feed
+        merged = []
+        seen = set()
+        for u in crawled + static:
+            if u not in seen:
+                seen.add(u)
+                merged.append(u)
+        merged.sort(key=self._candidate_score, reverse=True)
+        candidates = [u for u in merged if self._candidate_score(u) > -500][:24]
+
+        probes = utils.del_none(
+            await asyncio.gather(*[self.probe_rss_url(u, connection_mode, site) for u in candidates])
+        )
+        feed_probes = [p for p in probes if p.get("is_feed")]
+        if not feed_probes:
+            self.logger.info(f'[map_feed] url={site} step=rss found=False candidates={len(candidates)} feeds=0')
+            return None
+        best = max(feed_probes, key=lambda p: p.get("len") or 0)
+        if (best.get("len") or 0) > 4:
+            self.logger.info(
+                f'[map_feed] url={site} step=rss found=True '
+                f'url={best["url"]} items={best["len"]} candidates={len(candidates)} feeds={len(feed_probes)}'
+            )
+            return best["url"]
+        self.logger.info(
+            f'[map_feed] url={site} step=rss found=False '
+            f'best_url={best.get("url")} items={best.get("len")} reason=too_few_items '
+            f'candidates={len(candidates)} feeds={len(feed_probes)}'
+        )
+        return None
+
+
+    async def _items_to_news(self, items, channel, site):
+        """Filter raw RSS/HTML items into news docs. Returns (new_data, raw_n)."""
+        raw_n = len(items) if items else 0
+        if not items:
+            self.logger.info(f'[map_feed] url={site} step=items raw=0 filtered=0')
+            return [], 0
+        new_data = []
+        all_links = []
+        use_pid55 = channel.get("collector_id") in [55]
+        for item in items:
+            if use_pid55:
+                data = await self.create_docs_pid55(item, channel)
+            else:
+                data = await self.create_docs_pid50(item, channel)
+            if not data:
+                continue
+            link_ok = True
+            if channel.get("link_pattern"):
+                depth = len(re.findall("/", re.sub("(?:https*://|//)", "", data["link"])))
+                link_ok = depth == channel["link_pattern"]
+            if data["link"] not in all_links and link_ok:
+                all_links.append(data["link"])
+                new_data.append(data)
+        self.logger.info(f'[map_feed] url={site} step=items raw={raw_n} filtered={len(new_data)}')
+        return new_data, raw_n
+
+    async def _assemble_via_html(self, report, channel, site, reason: str):
+        """Build map from HTML listing. Clears RSS success flags. Returns (channel, report, new_data|None, fail_kind|None)."""
+        channel.pop("rss_link", None)
+        report["rss"] = False
+        self.logger.info(f'[map_feed] url={site} step=rss_failed reason={reason} try_html=1')
+        channel, report["collector"], connect_error = await self.get_collect_map(
+            channel, channel["connection_mode"]
+        )
+        if connect_error or not channel.get("collect_url"):
+            return channel, report, None, "find_collect_elements"
+        items = await self.get_items_pid55(
+            channel["connection_mode"], channel["collect_url"], channel["collect_elements"]
+        )
+        new_data, _ = await self._items_to_news(items, channel, site)
+        if len(new_data) < 5:
+            return channel, report, None, f"collect_news:{len(new_data)}"
+        return channel, report, new_data, None
 
     async def start_collector_map_assembly_process(self, report, channel, link, unittest=False):
+        site = channel["url"]
+        tried_rss = False
+
         if not link:
             rss = await self.find_rss_process(channel["connection_mode"], channel)
             if rss:
                 report["rss"] = True
                 channel["rss_link"] = [rss]
                 link = rss
+                tried_rss = True
             else:
                 report["rss"] = False
-                channel, report["collector"], connect_error = await self.get_collect_map(channel, channel["connection_mode"])
-                if connect_error:
+        else:
+            report["rss"] = True
+            tried_rss = True
+            self.logger.info(f'[map_feed] url={site} step=rss found=True url={link} source=seed')
+
+        # --- RSS path (discovered or seed) ---
+        if tried_rss and link:
+            items, rss_link = await self.get_data_rss_pid4(
+                channel["connection_mode"],
+                link,
+                headers=channel["headers"] if "headers" in channel else None,
+                return_rss_link=True,
+                site=site,
+            )
+            if items:
+                channel["rss_link"] = [rss_link]
+                new_data, _ = await self._items_to_news(items, channel, site)
+                if len(new_data) >= 5:
                     if unittest:
-                        return False
-                    self.logger.warning(f'FAILED find collect_elements on {channel["url"]}')
-                    report["failed_log"] = "FAILED find collect_elements"
-                    report["status"] = 2
-                    return channel, report, None
-        if 'collector_id' in channel and channel['collector_id'] in [55]:
-            if "collect_url" in channel and channel['collect_url']:
-                items = await self.get_items_pid55(channel["connection_mode"], channel['collect_url'], channel['collect_elements'])
+                        return True
+                    return channel, report, new_data
+                reason = f"too_few_news:{len(new_data)}"
             else:
+                reason = "empty_feed"
+
+            # RSS did not yield a usable map → full HTML retry
+            channel, report, new_data, fail_kind = await self._assemble_via_html(
+                report, channel, site, reason
+            )
+            if new_data:
+                if unittest:
+                    return True
+                return channel, report, new_data
+            if unittest:
+                return False
+            if fail_kind == "find_collect_elements":
+                self.logger.warning(f'FAILED find collect_elements on {site}')
+                report["failed_log"] = "FAILED find collect_elements"
+                report["status"] = 2
+            elif fail_kind and fail_kind.startswith("collect_news:"):
+                n = fail_kind.split(":", 1)[1]
+                self.logger.warning(f'FAILED collected news on {site} {n}')
+                report["failed_log"] = f"FAILED collect news ({n})"
+                report["status"] = 3
+            else:
+                self.logger.warning(f'FAILED collect items on {site}')
+                report["failed_log"] = "FAILED collect items"
+                report["status"] = 3
+            return channel, report, None
+
+        # --- HTML-only path (no RSS candidate) ---
+        if 'collector_id' in channel and channel['collector_id'] in [55] and channel.get("collect_url"):
+            items = await self.get_items_pid55(
+                channel["connection_mode"], channel["collect_url"], channel["collect_elements"]
+            )
+        else:
+            channel, report["collector"], connect_error = await self.get_collect_map(
+                channel, channel["connection_mode"]
+            )
+            if connect_error:
                 if unittest:
                     return False
-                self.logger.warning(f'FAILED find collect_url {channel["url"]}')
+                self.logger.warning(f'FAILED find collect_elements on {site}')
+                report["failed_log"] = "FAILED find collect_elements"
+                report["status"] = 2
+                return channel, report, None
+            if not channel.get("collect_url"):
+                if unittest:
+                    return False
+                self.logger.warning(f'FAILED find collect_url {site}')
                 report["failed_log"] = "FAILED find collect_url"
                 report["status"] = 3
                 return channel, report, None
-        else:
-            items, rss_link = await self.get_data_rss_pid4(channel["connection_mode"], link, headers=channel["headers"] if "headers" in channel else None, return_rss_link=True)
-            channel["rss_link"] = [rss_link]
-        if not items:
-            if unittest:
-                return False
-            self.logger.warning(f'FAILED collect items on {channel["url"]}')
-            report["failed_log"] = "FAILED collect items"
-            report["status"] = 3
-            return channel, report, None
-        new_data = []
-        all_links = []
-        for item in items:
-            if 'collector_id' in channel and channel['collector_id'] in [55]:
-                data = await self.create_docs_pid55(item, channel)
-            else:
-                data = await self.create_docs_pid50(item, channel)
-            if data:
-                if data["link"] not in all_links and (len(re.findall("/", re.sub("(?:https*://|//)", "", data["link"]))) == channel["link_pattern"] if "link_pattern" in channel and channel["link_pattern"] else True):
-                    all_links.append(data["link"])
-                    new_data.append(data)
+            items = await self.get_items_pid55(
+                channel["connection_mode"], channel["collect_url"], channel["collect_elements"]
+            )
+
+        new_data, _ = await self._items_to_news(items, channel, site)
         if len(new_data) < 5:
             if unittest:
                 return False
-            self.logger.warning(f'FAILED collected news on {channel["url"]} {len(new_data)}')
-            report["failed_log"] = f"FAILED collect news ({len(new_data)})"
-            report["status"] = 3
+            if not items:
+                self.logger.warning(f'FAILED collect items on {site}')
+                report["failed_log"] = "FAILED collect items"
+                report["status"] = 3
+            else:
+                self.logger.warning(f'FAILED collected news on {site} {len(new_data)}')
+                report["failed_log"] = f"FAILED collect news ({len(new_data)})"
+                report["status"] = 3
             return channel, report, None
         if unittest:
             return True

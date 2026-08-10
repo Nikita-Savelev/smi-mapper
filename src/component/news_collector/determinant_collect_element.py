@@ -10,6 +10,7 @@ import asyncio
 from aiohttp_socks import ProxyConnector
 from common.utils import get_connection_options
 import random
+from loguru import logger
 
 def get_first_el(some_list):
     return some_list[0] if len(some_list) >= 1 else None
@@ -179,7 +180,7 @@ def find_collector_element(page, site, status):
                 if len(all_elements[el]["parents"][level]) > 3:
                     continue
                 for el_full_name in all_elements[el]["parents"][level]:
-                    name, attrs = el_full_name.split('|')
+                    name, attrs = el_full_name.split('|', 1)
                     attrs = json.loads(attrs)
                     el_list.append({"name": name, "attrs": attrs})
                 lmap = {"el_list": el_list, "next": lmap}
@@ -190,7 +191,14 @@ def find_collector_element(page, site, status):
             lmap = {"name": name, "attrs": attrs, "next": False, "special_path": {"title": None, "link": None, "pubdate": None}}
             maps.append(lmap)
             continue
-    res = {"response_code": status, "all_date_elements": len(all_date_elements), "fit_elements": len(all_elements), "map_els": len(maps)}
+    anchor = "dates" if all_date_elements else "href_fallback"
+    res = {
+        "response_code": status,
+        "all_date_elements": len(all_date_elements),
+        "fit_elements": len(all_elements),
+        "map_els": len(maps),
+        "anchor": anchor,
+    }
     best_patern = {"len_options": None, "count": 0}
     for pat in all_patterns:
         if all_patterns[pat] > best_patern["count"]:
@@ -223,15 +231,30 @@ async def get_valid_page(data, newdata):
         return collector_elements, link, report, pattern, connect_error
 
 async def run(newdata, collect_url, connection_mode):
+    site = newdata["url"]
     possible_links = [f"https://{newdata['url']}/news", f"http://{newdata['url']}/news", f"https://{newdata['url']}", f"http://{newdata['url']}", f"https://{newdata['url']}/articles", f"http://{newdata['url']}/articles"] if not collect_url else [collect_url]
     report = None
     connect_error = True
     all_data = del_none(await asyncio.gather(*[get_page(link, connection_mode) for link in possible_links]))
+    pages_got = [(status, link) for _, status, link in all_data]
+    logger.info(
+        f'[map_feed] url={site} step=html_pages tried={len(possible_links)} '
+        f'ok={len(all_data)} got={pages_got}'
+    )
     best_map = {"len_els": 0, "map": None}
     for map in del_none(await asyncio.gather(*[get_valid_page(data, newdata) for data in all_data])):
         collector_elements, link, report, pattern, connect_error = map
         if best_map["len_els"] < len(collector_elements):
             best_map = {"len_els": len(collector_elements), "map": map}
     if best_map["map"]:
+        collector_elements, link, report, pattern, connect_error = best_map["map"]
+        logger.info(
+            f'[map_feed] url={site} step=html_map collect_url={link} '
+            f'els={best_map["len_els"]} maps={report.get("map_els") if report else None} '
+            f'dates={report.get("all_date_elements") if report else None} '
+            f'fit={report.get("fit_elements") if report else None} '
+            f'anchor={report.get("anchor") if report else None} pattern={pattern}'
+        )
         return best_map["map"]
+    logger.info(f'[map_feed] url={site} step=html_map result=none collector={report}')
     return None, None, report, None, connect_error

@@ -2,8 +2,8 @@ import time as tm
 from arango import ArangoClient
 from configparser import ConfigParser
 import component.metrics as metrics
-import requests
 import os
+from loguru import logger
 
 def get_plug():
     return {
@@ -101,23 +101,21 @@ class ArangoConnector:
     def update_chanel(self, channel, report):
         if 'status' not in report or report["status"] != 1:
             channel["map_assembly_status"] = 3
-            # plug = get_plug()
-            # if "trash_items" not in channel:
-            #     channel["trash_items"] = plug['trash_items']
-            # if "collect_elements" not in channel:
-            #     channel["collect_elements"] = plug['collect_elements']
-            # if "news_elements" not in channel:
-            #     channel["news_elements"] = plug['news_elements']
         else:
             channel["map_assembly_status"] = 1
-            try:
-                PORT = int(os.getenv("PORT"))
-            except:
-                PORT = 5035
-            requests.get(f"http://0.0.0.0:{PORT}/inc_successfully")
+            # metrics/inc_successfully отключены — ломали прогон (ASGI/aioprometheus)
 
         channel["report"] = report
-        self.collection_channels.update(channel)
+        try:
+            # _rev от concurrent update часто даёт ArangoServerError → не pickle'ится в Pool
+            channel.pop("_rev", None)
+            self.collection_channels.update(channel)
+        except Exception as ex:
+            # не пробрасываем arango.* наружу: multiprocessing.Pool ломается на unpickle
+            logger.warning(
+                f'Failed Arango update for {channel.get("url")}: '
+                f'{type(ex).__name__}: {ex}'
+            )
 
     def get_count_channels(self):
         ret = self.aql_execute(f'FOR doc IN {self.collection_channels_name} '

@@ -83,8 +83,7 @@ async def readiness_probe(response: Response):
 
 @router.get("/inc_successfully")
 async def inc_successfully(request: Request):
-    if str(request.client.host) == "127.0.0.1":
-        component.metrics.all_successfully_maps.inc(labels=None)
+    # метрики пока не собираем; endpoint оставлен no-op для старых клиентов
     return True
 
 

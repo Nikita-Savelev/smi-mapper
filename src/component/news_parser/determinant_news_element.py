@@ -113,7 +113,9 @@ def collect_structure_patern(structures):
     structure_patern = ''
     for name in structures:
         structure_patern += vector_name[name]
-    return int(structure_patern)
+    # Строковый отпечаток: раньше был int(), на Python 3.12 падает при >4300 цифр.
+    # Значение используется только как ключ уникальности (set), не как числовой признак ML.
+    return structure_patern
 
 
 def average_values(attrs, name="pillar", count_valid_news=None):
@@ -615,8 +617,10 @@ def vectoriser(string):
     v_string = re.sub("[^0-9]", "4",
                       re.sub("~~~~", "1", re.sub("\s+", "3", re.sub("\w+", "2", re.sub("\d+", "~~~~", string)))))
     if not v_string:
-        return 0
-    return int(v_string)
+        return "0"
+    # Строковый отпечаток вместо int(): иначе ValueError int_max_str_digits на длинных статьях (Py3.12+).
+    # Используется как ключ уникальности / dict key, не как арифметическое число.
+    return v_string
 
 
 def get_count_all_items(items):

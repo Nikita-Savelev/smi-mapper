@@ -1,3 +1,14 @@
 __pycache__/
 .idea
 .venv
+venv/
+
+# Secrets — never commit (use config_template.ini)
+src/config/config.ini
+*.local.ini
+.env
+
+# Local run artifacts
+*.log
+mapper_local.log
+logs/
