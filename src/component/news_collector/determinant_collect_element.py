@@ -58,9 +58,13 @@ def erect_to_percent(num, percent):
     return num / 100 * percent
 
 def clean(item):
+    if item is None:
+        return ""
     if type(item) is list:
         string = []
         for i in item:
+            if i is None:
+                continue
             string.append(re.sub('\\xa0|&[a-zA-Z]+;', ' ', re.sub(r'&ldquo;', '"', re.sub('(?:\]\]>|\u200b|<!\[CDATA\[|\\r|<.+?>|&#[0-9]+;|\\"|\\n|\\t)+', '', i))).strip())
         return string
     return re.sub('\\xa0|&[a-zA-Z]+;', ' ', re.sub(r'&ldquo;', '"', re.sub('(?:\]\]>|\u200b|<!\[CDATA\[|\\r|<.+?>|&#[0-9]+;|\\n|\\t)+', '', item))).strip()
@@ -103,13 +107,35 @@ def get_short_el_name(el):
 def find_optimum_elements(page):
     all_links = {}
     best_pattern = {"pattern": "", "count": 0}
+    null_href_in_attrs = 0
+    for el in page.find_all(lambda el: "href" in el.attrs):
+        href = el.get("href")
+        if href is None or not isinstance(href, str):
+            null_href_in_attrs += 1
+    if null_href_in_attrs:
+        logger.warning(
+            f"[map_feed] step=find_optimum_elements null_href_in_attrs={null_href_in_attrs} "
+            f"(href in attrs but value not str — re.fullmatch risk)"
+        )
     for link in [re.sub("[0-9]+", "[0-9]+", re.sub("(.+/)(.+)", r"\1.+?", re.sub("([\\\|\[\]{}()+*^])", r"\\\1", el.get("href") if el.get("href")[-1] != "/" else el.get("href")[:-1]), flags=re.DOTALL)) + "/*" for el in page.find_all(lambda el: "href" in el.attrs) if el.get("href")]:
         if link not in all_links:
             all_links[link] = 1
         all_links[link] += 1
         if all_links[link] > best_pattern["count"]:
             best_pattern = {"pattern": link, "count": all_links[link]}
-    return page.find_all(lambda el: "href" in el.attrs and re.fullmatch(best_pattern["pattern"], el.get("href"), flags=re.DOTALL)), best_pattern["pattern"]
+    try:
+        matched = page.find_all(
+            lambda el: isinstance(el.get("href"), str)
+            and bool(el.get("href"))
+            and re.fullmatch(best_pattern["pattern"], el.get("href"), flags=re.DOTALL)
+        )
+    except TypeError as exc:
+        logger.warning(
+            f"[map_feed] step=find_optimum_elements TypeError pattern={best_pattern!r} "
+            f"null_href_in_attrs={null_href_in_attrs} err={exc}"
+        )
+        raise
+    return matched, best_pattern["pattern"]
 
 
 def find_card_anchor_elements(page, min_repeat: int = 3):
@@ -273,8 +299,10 @@ def get_href(item):
     link = None
     all_text = item.get_text('|').split('|')
     try:
-        title = clean(item.find(lambda el: re.fullmatch("h[0-9]+", el.name)).get_text(strip=True))
-    except:
+        h_el = item.find(lambda el: el.name and re.fullmatch("h[0-9]+", el.name))
+        if h_el is not None:
+            title = clean(h_el.get_text(strip=True))
+    except Exception:
         pass
     bigest_text = {"long": 0, "text": None}
     for text_item in all_text:
@@ -288,7 +316,12 @@ def get_href(item):
             if len(text_item) > bigest_text["long"]:
                 bigest_text = {"long": len(text_item), "text": text_item}
     if not title:
-        title = clean(bigest_text["text"])
+        raw_title = bigest_text["text"]
+        if raw_title is None:
+            return
+        title = clean(raw_title)
+    if not title:
+        return
     if len(re.findall("[а-яА-ЯЁёA-Za-z]+", title)) < 3:
         return
     links = [el.get("href") if "href" in el.attrs else None for el in item.find_all("a")]

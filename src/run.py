@@ -165,8 +165,15 @@ async def main(cpu_id, shm_name):
                 if items_data:
                     channel, report = await create_map_for_parser(channel, report, items_data, parser_mapper)
             except Exception as exc:
+                import traceback
                 ex_traceback = utils.get_exception()
-                logger.warning(f'Failed map assembly from {channel["url"]} ex_traceback = ({ex_traceback})')
+                logger.warning(
+                    f'Failed map assembly from {channel["url"]} ex_traceback = ({ex_traceback})'
+                )
+                logger.warning(
+                    f'[map_feed] url={channel["url"]} step=exception_tb\n'
+                    f'{traceback.format_exc()}'
+                )
                 report = channel.get("report") if isinstance(channel.get("report"), dict) else report
                 if _is_connect_error(exc, ex_traceback):
                     report["failed_log"] = f"CONNECT ERROR: ({ex_traceback})"

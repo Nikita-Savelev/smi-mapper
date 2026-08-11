@@ -47,13 +47,22 @@ def get_connection_options(connection_mode, response_type=ProxyConnector):
 
 
 def get_exception():
+    """Full chain of frames (innermost last), not only the outer await line."""
     exc_type, exc_obj, tb = sys.exc_info()
-    f = tb.tb_frame
-    lineno = tb.tb_lineno
-    filename = f.f_code.co_filename
-    linecache.checkcache(filename)
-    line = linecache.getline(filename, lineno, f.f_globals)
-    return 'EXCEPTION IN ({}, LINE {} "{}"): {}'.format(filename, lineno, line.strip(), exc_obj)
+    if tb is None:
+        return f"EXCEPTION: {exc_obj}"
+    frames = []
+    cur = tb
+    while cur is not None:
+        f = cur.tb_frame
+        lineno = cur.tb_lineno
+        filename = f.f_code.co_filename
+        linecache.checkcache(filename)
+        line = linecache.getline(filename, lineno, f.f_globals).strip()
+        frames.append(f'{filename}:{lineno} "{line}"')
+        cur = cur.tb_next
+    chain = " <- ".join(frames)
+    return f"EXCEPTION IN ({chain}): {exc_obj}"
 
 
 def get_first_el(some_list):
@@ -65,9 +74,13 @@ def del_none(some_list):
 
 
 def clean(item):
+    if item is None:
+        return ""
     if type(item) is list:
         string = []
         for i in item:
+            if i is None:
+                continue
             string.append(re.sub('\\xa0|&[a-zA-Z]+;', ' ', re.sub(r'&ldquo;', '"', re.sub('(?:\]\]>|\u200b|<!\[CDATA\[|\\r|<.+?>|&#[0-9]+;|\\"|\\n|\\t)+', '', i))).strip())
         return string
     return re.sub('\\xa0|&[a-zA-Z]+;', ' ', re.sub(r'&ldquo;', '"', re.sub('(?:\]\]>|\u200b|<!\[CDATA\[|\\r|<.+?>|&#[0-9]+;|\\n|\\t)+', '', item))).strip()
