@@ -27,6 +27,10 @@ from common import utils
 
 weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Th', 'Thu', 'Thur', 'Fri', 'Sat']
 
+# D.3: map-assembly minimum items (was hard-coded 5).
+MIN_MAP_NEWS = 3
+
+
 def check_time(time: int) -> int or None:
     now = int(datetime.datetime.now().timestamp())
     if not time or time > now:
@@ -405,23 +409,54 @@ class NewsCollector:
         if not items:
             self.logger.info(f'[map_feed] url={site} step=items raw=0 filtered=0')
             return [], 0
-        new_data = []
-        all_links = []
+        docs = []
         use_pid55 = channel.get("collector_id") in [55]
         for item in items:
             if use_pid55:
                 data = await self.create_docs_pid55(item, channel)
             else:
                 data = await self.create_docs_pid50(item, channel)
-            if not data:
-                continue
-            link_ok = True
-            if channel.get("link_pattern"):
-                depth = len(re.findall("/", re.sub("(?:https*://|//)", "", data["link"])))
-                link_ok = depth == channel["link_pattern"]
-            if data["link"] not in all_links and link_ok:
-                all_links.append(data["link"])
-                new_data.append(data)
+            if data:
+                docs.append(data)
+
+        def _depth(link: str) -> int:
+            return len(re.findall("/", re.sub("(?:https*://|//)", "", link)))
+
+        def _filter(docs_in, toler: int):
+            out, seen = [], []
+            target = channel.get("link_pattern")
+            for data in docs_in:
+                link_ok = True
+                if target is not None:
+                    link_ok = abs(_depth(data["link"]) - target) <= toler
+                if data["link"] not in seen and link_ok:
+                    seen.append(data["link"])
+                    out.append(data)
+            return out
+
+        # Exact pattern first; if too few — soft ±1; then recount mode from docs (D.3).
+        if channel.get("link_pattern") is not None:
+            new_data = _filter(docs, 0)
+            if len(new_data) < MIN_MAP_NEWS:
+                soft = _filter(docs, 1)
+                if len(soft) > len(new_data):
+                    new_data = soft
+                    self.logger.info(
+                        f'[map_feed] url={site} step=link_pattern relaxed=±1 '
+                        f'kept={len(new_data)}'
+                    )
+            if len(new_data) < MIN_MAP_NEWS and docs:
+                depths = [_depth(d["link"]) for d in docs]
+                mode = max(set(depths), key=depths.count)
+                channel["link_pattern"] = mode
+                new_data = _filter(docs, 1)
+                self.logger.info(
+                    f'[map_feed] url={site} step=link_pattern recount mode={mode} '
+                    f'kept={len(new_data)}'
+                )
+        else:
+            new_data = _filter(docs, 0)
+
         self.logger.info(f'[map_feed] url={site} step=items raw={raw_n} filtered={len(new_data)}')
         return new_data, raw_n
 
@@ -439,13 +474,43 @@ class NewsCollector:
             channel["connection_mode"], channel["collect_url"], channel["collect_elements"]
         )
         new_data, _ = await self._items_to_news(items, channel, site)
-        if len(new_data) < 5:
+        if len(new_data) < MIN_MAP_NEWS:
             return channel, report, None, f"collect_news:{len(new_data)}"
         return channel, report, new_data, None
 
     async def start_collector_map_assembly_process(self, report, channel, link, unittest=False):
         site = channel["url"]
         tried_rss = False
+
+        # Bench / HTML-only: skip RSS seed and discovery (D HTML measurement).
+        if channel.get("skip_rss") or channel.get("force_html"):
+            link = None
+            report["rss"] = False
+            channel.pop("rss_link", None)
+            self.logger.info(f'[map_feed] url={site} step=rss skipped=force_html')
+            channel, report, new_data, fail_kind = await self._assemble_via_html(
+                report, channel, site, "force_html"
+            )
+            if new_data:
+                if unittest:
+                    return True
+                return channel, report, new_data
+            if unittest:
+                return False
+            if fail_kind == "find_collect_elements":
+                self.logger.warning(f'FAILED find collect_elements on {site}')
+                report["failed_log"] = "FAILED find collect_elements"
+                report["status"] = 2
+            elif fail_kind and fail_kind.startswith("collect_news:"):
+                n = fail_kind.split(":", 1)[1]
+                self.logger.warning(f'FAILED collected news on {site} {n}')
+                report["failed_log"] = f"FAILED collect news ({n})"
+                report["status"] = 3
+            else:
+                self.logger.warning(f'FAILED collect items on {site}')
+                report["failed_log"] = "FAILED collect items"
+                report["status"] = 3
+            return channel, report, None
 
         if not link:
             rss = await self.find_rss_process(channel["connection_mode"], channel)
@@ -473,7 +538,7 @@ class NewsCollector:
             if items:
                 channel["rss_link"] = [rss_link]
                 new_data, _ = await self._items_to_news(items, channel, site)
-                if len(new_data) >= 5:
+                if len(new_data) >= MIN_MAP_NEWS:
                     if unittest:
                         return True
                     return channel, report, new_data
@@ -534,7 +599,7 @@ class NewsCollector:
             )
 
         new_data, _ = await self._items_to_news(items, channel, site)
-        if len(new_data) < 5:
+        if len(new_data) < MIN_MAP_NEWS:
             if unittest:
                 return False
             if not items:
@@ -675,8 +740,10 @@ class NewsCollector:
             link = re.sub("/{3,}", "//", link)
             item_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, re.sub("https*://", "", link)))
         #print(f'link {link}\ntitle {title}\npubdate ')
-        if link and title and pubdate:
+        # D.3: pubdate optional on HTML listing — keep title+link; date may appear later.
+        if link and title:
             collect_date = int(tm.mktime(datetime.datetime.now().timetuple()))
+            published = check_time(pubdate) if pubdate else collect_date
             doc = {
                 "important": channel['important'] if "important" in channel else False,
                 "_key": item_uuid,
@@ -687,7 +754,7 @@ class NewsCollector:
                 "feed_id": channel['feed_id'],
                 "user_id": channel['user_id'],
                 "collect_date": collect_date,
-                "published_date": check_time(pubdate),
+                "published_date": published,
                 "description": None,
                 "imgF": False,
                 "videoF": False,
