@@ -2,6 +2,7 @@ import os
 import random
 import sys
 import uuid
+import json
 from configparser import ConfigParser
 import time as tm
 import asyncio
@@ -17,6 +18,7 @@ from loguru import logger
 import datetime
 import dateparser
 from component.news_collector import determinant_collect_element
+from component.news_collector import llm_collector_map
 from multiprocessing import shared_memory
 import time
 from aiohttp_socks import ProxyConnector
@@ -55,6 +57,53 @@ class NewsCollector:
         self.proxy_pool = []
         self.semaphore = asyncio.Semaphore(int(self.config[self.service_type]['semaphore']))
         self.channels = None
+        self.llm_cfg = llm_collector_map.llm_config_from_parser(self.config)
+        self._http_trace_site = None
+        self._http_trace_n = 0
+        self._http_trace_pages = []
+
+    def _http_trace_reset(self, site: str):
+        self._http_trace_site = site
+        self._http_trace_n = 0
+        self._http_trace_pages = []
+
+    def _http_trace_record(self, target: str, *, via: str, mode, status, ms: int, ok: int, proxy, err=None):
+        """Log one outbound GET to a news site (not LLM API)."""
+        site = self._http_trace_site
+        if not site:
+            return
+        self._http_trace_n += 1
+        n = self._http_trace_n
+        rec = {
+            "n": n,
+            "via": via,
+            "target": target,
+            "status": status,
+            "ms": ms,
+            "ok": ok,
+            "mode": mode,
+            "proxy": bool(proxy),
+        }
+        if err:
+            rec["err"] = err
+        self._http_trace_pages.append(rec)
+        err_s = f" err={err}" if err else ""
+        self.logger.info(
+            f"[map_llm] url={site} step=http n={n} via={via} target={target} "
+            f"status={status} ms={ms} ok={ok} mode={mode} proxy={int(bool(proxy))}{err_s}"
+        )
+
+    def _http_trace_summary(self) -> dict:
+        site = self._http_trace_site or ""
+        pages = list(self._http_trace_pages)
+        n = len(pages)
+        targets = [p["target"] for p in pages]
+        self.logger.info(
+            f"[map_llm] url={site} step=http_sum n={n} targets={targets}"
+        )
+        out = {"n": n, "pages": pages}
+        self._http_trace_site = None
+        return out
 
     async def set_proxy_pool(self):
         self.proxy_pool.extend(self.arango.get_proxy_pool())
@@ -66,7 +115,7 @@ class NewsCollector:
         if not "report" in channel:
             return "default"
         proxy_pool_filter = set(self.proxy_pool).difference(set(channel["report"]["used_connections"]))
-        return list(proxy_pool_filter)[0] if proxy_pool_filter else "tor"
+        return list(proxy_pool_filter)[0] if proxy_pool_filter else "default"
 
     def get_items_recursive(self, map: dict, page: list) -> [BeautifulSoup]:
         if not map["next"]:
@@ -326,18 +375,40 @@ class NewsCollector:
     async def get_items_pid55(self, connection_mode, link, collect_elements):
         proxy, headers = get_connection_options(connection_mode, response_type=str)
         timeout = aiohttp.ClientTimeout(total=60)
+        t0 = time.monotonic()
+        status = None
+        soup = None
+        err = None
         try:
             async with aiohttp.request("get", link, headers=headers, timeout=timeout, proxy=proxy) as response:
+                status = response.status
                 try:
                     response = await response.text()
                     soup = BeautifulSoup(response, 'lxml', multi_valued_attributes=None)
                 except UnicodeDecodeError:
                     soup = BeautifulSoup(await response.read(), 'lxml', multi_valued_attributes=None)
         except Exception as ex:
+            err = f"{type(ex).__name__}: {ex}"[:240]
             logger.info(utils.get_exception())
+            soup = None
+        finally:
+            self._http_trace_record(
+                link,
+                via="items_pid55",
+                mode=connection_mode,
+                status=status,
+                ms=int((time.monotonic() - t0) * 1000),
+                ok=1 if soup is not None else 0,
+                proxy=proxy,
+                err=err,
+            )
+        if soup is None:
             return None
+        return self._items_from_soup(soup, collect_elements)
+
+    def _items_from_soup(self, soup, collect_elements):
         items = []
-        for el in collect_elements:
+        for el in collect_elements or []:
             items.extend(self.get_items_recursive(el, [soup]))
         return items
 
@@ -469,7 +540,8 @@ class NewsCollector:
             channel, channel["connection_mode"]
         )
         if connect_error or not channel.get("collect_url"):
-            return channel, report, None, "find_collect_elements"
+            kind = "connect:html_fetch" if connect_error else "find_collect_elements"
+            return channel, report, None, kind
         items = await self.get_items_pid55(
             channel["connection_mode"], channel["collect_url"], channel["collect_elements"]
         )
@@ -478,9 +550,252 @@ class NewsCollector:
             return channel, report, None, f"collect_news:{len(new_data)}"
         return channel, report, new_data, None
 
+    async def _fetch_soup(self, link: str, connection_mode: str):
+        proxy, headers = get_connection_options(connection_mode, response_type=str)
+        timeout = aiohttp.ClientTimeout(total=60)
+        t0 = time.monotonic()
+        status = None
+        soup = None
+        err = None
+        try:
+            async with aiohttp.request("get", link, headers=headers, timeout=timeout, proxy=proxy) as response:
+                status = response.status
+                # Как HTML-D get_page: 4xx/5xx — не карта, а connect (иначе 403 → пустой soup → validate_fail).
+                if status is None or status >= 400:
+                    try:
+                        await response.read()
+                    except Exception:
+                        pass
+                    soup = None
+                else:
+                    try:
+                        text = await response.text()
+                        soup = BeautifulSoup(text, "lxml", multi_valued_attributes=None)
+                    except UnicodeDecodeError:
+                        soup = BeautifulSoup(await response.read(), "lxml", multi_valued_attributes=None)
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"[:240]
+            self.logger.info(utils.get_exception())
+            soup = None
+        finally:
+            self._http_trace_record(
+                link,
+                via="fetch_soup",
+                mode=connection_mode,
+                status=status,
+                ms=int((time.monotonic() - t0) * 1000),
+                ok=1 if soup is not None else 0,
+                proxy=proxy,
+                err=err,
+            )
+        return soup
+
+    async def _assemble_via_llm(self, report, channel, site: str, *, forced: bool = False):
+        """
+        E: LLM path for collector map (after HTML fail, or channel force_llm).
+        Returns (channel, report, new_data|None).
+        """
+        cfg = getattr(self, "llm_cfg", None) or llm_collector_map.llm_config_from_parser(self.config)
+        self._http_trace_reset(site)
+        self.logger.info(
+            f"[map_llm] url={site} step=hook enter enabled={cfg.get('enabled')} "
+            f"model={cfg.get('model')} forced={int(bool(forced))} "
+            f"mode={channel.get('connection_mode') or 'default'} "
+            f"fail_prev={report.get('failed_log')}"
+        )
+        if not cfg.get("enabled"):
+            self.logger.info(f"[map_llm] url={site} step=skip reason=disabled")
+            return channel, report, None
+
+        result = await llm_collector_map.assemble_llm_collector_map(
+            site=site,
+            connection_mode=channel.get("connection_mode") or "default",
+            cfg=cfg,
+            fetch_page=self._fetch_soup,
+        )
+        report["llm_collector"] = result.get("report") or {}
+        report["llm_collector"]["ok"] = bool(result.get("ok"))
+        report["llm_collector"]["reason"] = result.get("reason")
+        if not result.get("ok"):
+            report["llm_collector"]["http"] = self._http_trace_summary()
+            self.logger.info(
+                f"[map_llm] url={site} step=hook done ok=0 reason={result.get('reason')} "
+                f"http_n={report['llm_collector']['http'].get('n')}"
+            )
+            return channel, report, None
+
+        channel["collector_id"] = 55
+        channel["collect_url"] = result["collect_url"]
+        channel["collect_elements"] = result["collect_elements"]
+        channel.pop("rss_link", None)
+        report["rss"] = False
+        report["collector"] = {
+            "anchor": "llm",
+            "maps": len(result["collect_elements"]),
+            "source": "llm",
+        }
+        self.logger.info(
+            f"[map_llm] url={site} step=hook maps_ok collect_url={channel['collect_url']} "
+            f"elements={json.dumps(channel['collect_elements'], ensure_ascii=False)}"
+        )
+        channel["_require_listing_date"] = True
+        try:
+            win_soup = result.get("soup")
+            if win_soup is not None:
+                items = self._items_from_soup(win_soup, channel["collect_elements"])
+                via = "win_soup"
+            else:
+                items = await self.get_items_pid55(
+                    channel["connection_mode"], channel["collect_url"], channel["collect_elements"]
+                )
+                via = "items_pid55"
+            raw_n = len(items) if items else 0
+            self.logger.info(f"[map_llm] url={site} step=hook items_raw={raw_n} via={via}")
+            new_data, _ = await self._items_to_news(items, channel, site)
+        finally:
+            channel.pop("_require_listing_date", None)
+        report["llm_collector"]["http"] = self._http_trace_summary()
+
+        if len(new_data) < MIN_MAP_NEWS:
+            self.logger.info(
+                f"[map_llm] url={site} step=done ok=0 reason=collect_news:{len(new_data)}"
+            )
+            report["llm_collector"]["items_after_filter"] = len(new_data)
+            report["llm_collector"]["ok"] = False
+            report["llm_collector"]["reason"] = f"collect_news:{len(new_data)}"
+            return channel, report, None
+
+        depths = [
+            len(re.findall("/", re.sub("(?:https*://|//)", "", d["link"])))
+            for d in new_data
+        ]
+        if depths:
+            channel["link_pattern"] = max(set(depths), key=depths.count)
+        self.logger.info(
+            f"[map_llm] url={site} step=done ok=1 collect_url={channel['collect_url']} "
+            f"maps={len(channel['collect_elements'])} items={len(new_data)} "
+            f"link_pattern={channel.get('link_pattern')} "
+            f"sample_titles={[d.get('title', '')[:60] for d in new_data[:5]]}"
+        )
+        report["llm_collector"]["items_after_filter"] = len(new_data)
+        return channel, report, new_data
+
+    def _apply_collector_fail(self, report, site: str, fail_kind: str):
+        if fail_kind and fail_kind.startswith("connect:"):
+            detail = fail_kind.split(":", 1)[1] or "fetch"
+            http = (report.get("llm_collector") or {}).get("http") or {}
+            bits = []
+            for p in http.get("pages") or []:
+                part = f"{p.get('target')} status={p.get('status')}"
+                if p.get("err"):
+                    part += f" err={p['err']}"
+                bits.append(part)
+            extra = "; ".join(bits[:6])
+            msg = (
+                f"CONNECT ERROR: site did not return a response ({detail}"
+                + (f"; {extra}" if extra else "")
+                + ") — not collect_elements"
+            )
+            self.logger.warning(f"{msg} on {site}")
+            report["failed_log"] = msg
+            report["status"] = 4
+        elif fail_kind == "find_collect_elements":
+            self.logger.warning(f"FAILED find collect_elements on {site}")
+            report["failed_log"] = "FAILED find collect_elements"
+            report["status"] = 2
+        elif fail_kind and fail_kind.startswith("collect_news:"):
+            n = fail_kind.split(":", 1)[1]
+            self.logger.warning(f"FAILED collected news on {site} {n}")
+            report["failed_log"] = f"FAILED collect news ({n})"
+            report["status"] = 3
+        else:
+            self.logger.warning(f"FAILED collect items on {site}")
+            report["failed_log"] = "FAILED collect items"
+            report["status"] = 3
+
+    @staticmethod
+    def _page_no_http_response(page: dict) -> bool:
+        if page.get("ok"):
+            return False
+        if page.get("status") is None:
+            return True
+        err = str(page.get("err") or "")
+        return any(
+            m in err
+            for m in (
+                "ClientConnector",
+                "Timeout",
+                "SSL",
+                "NameResolution",
+                "ServerDisconnected",
+                "ClientOSError",
+                "Cannot connect",
+            )
+        )
+
+    @staticmethod
+    def _page_http_error(page: dict) -> bool:
+        st = page.get("status")
+        try:
+            return st is not None and int(st) >= 400
+        except (TypeError, ValueError):
+            return False
+
+    def _fail_kind_from_llm_report(self, report) -> str:
+        lc = report.get("llm_collector") or {}
+        reason = lc.get("reason") or ""
+        if not isinstance(reason, str):
+            reason = ""
+        if reason == "home_fetch" or reason.startswith("connect:"):
+            return f"connect:{reason}" if reason == "home_fetch" else reason
+        pages = (lc.get("http") or {}).get("pages") or []
+        if pages and all(
+            self._page_no_http_response(p) or self._page_http_error(p) for p in pages
+        ):
+            if any(self._page_http_error(p) for p in pages):
+                return "connect:http_error"
+            return "connect:no_http_response"
+        if reason.startswith("collect_news:"):
+            return reason
+        return "find_collect_elements"
+
+    async def _after_html_fail(self, report, channel, site: str, fail_kind: str, unittest: bool = False):
+        """Try LLM fallback; on miss apply fail status. Returns same shapes as start_collector…"""
+        self.logger.info(
+            f"[map_llm] url={site} step=after_html_fail kind={fail_kind} unittest={unittest}"
+        )
+        if not unittest:
+            channel, report, new_data = await self._assemble_via_llm(report, channel, site)
+            if new_data:
+                return channel, report, new_data
+        if unittest:
+            return False
+        if report.get("llm_collector"):
+            fail_kind = self._fail_kind_from_llm_report(report)
+        self._apply_collector_fail(report, site, fail_kind)
+        return channel, report, None
+
     async def start_collector_map_assembly_process(self, report, channel, link, unittest=False):
         site = channel["url"]
         tried_rss = False
+
+        # Bench / LLM-only: skip RSS and HTML heuristics, go straight to E.
+        if channel.get("force_llm"):
+            link = None
+            report["rss"] = False
+            channel.pop("rss_link", None)
+            self.logger.info(f"[map_feed] url={site} step=rss+html skipped=force_llm")
+            if not unittest:
+                channel, report, new_data = await self._assemble_via_llm(
+                    report, channel, site, forced=True
+                )
+                if new_data:
+                    return channel, report, new_data
+                self._apply_collector_fail(
+                    report, site, self._fail_kind_from_llm_report(report)
+                )
+                return channel, report, None
+            return False
 
         # Bench / HTML-only: skip RSS seed and discovery (D HTML measurement).
         if channel.get("skip_rss") or channel.get("force_html"):
@@ -495,22 +810,7 @@ class NewsCollector:
                 if unittest:
                     return True
                 return channel, report, new_data
-            if unittest:
-                return False
-            if fail_kind == "find_collect_elements":
-                self.logger.warning(f'FAILED find collect_elements on {site}')
-                report["failed_log"] = "FAILED find collect_elements"
-                report["status"] = 2
-            elif fail_kind and fail_kind.startswith("collect_news:"):
-                n = fail_kind.split(":", 1)[1]
-                self.logger.warning(f'FAILED collected news on {site} {n}')
-                report["failed_log"] = f"FAILED collect news ({n})"
-                report["status"] = 3
-            else:
-                self.logger.warning(f'FAILED collect items on {site}')
-                report["failed_log"] = "FAILED collect items"
-                report["status"] = 3
-            return channel, report, None
+            return await self._after_html_fail(report, channel, site, fail_kind or "find_collect_elements", unittest)
 
         if not link:
             rss = await self.find_rss_process(channel["connection_mode"], channel)
@@ -554,22 +854,7 @@ class NewsCollector:
                 if unittest:
                     return True
                 return channel, report, new_data
-            if unittest:
-                return False
-            if fail_kind == "find_collect_elements":
-                self.logger.warning(f'FAILED find collect_elements on {site}')
-                report["failed_log"] = "FAILED find collect_elements"
-                report["status"] = 2
-            elif fail_kind and fail_kind.startswith("collect_news:"):
-                n = fail_kind.split(":", 1)[1]
-                self.logger.warning(f'FAILED collected news on {site} {n}')
-                report["failed_log"] = f"FAILED collect news ({n})"
-                report["status"] = 3
-            else:
-                self.logger.warning(f'FAILED collect items on {site}')
-                report["failed_log"] = "FAILED collect items"
-                report["status"] = 3
-            return channel, report, None
+            return await self._after_html_fail(report, channel, site, fail_kind or "find_collect_elements", unittest)
 
         # --- HTML-only path (no RSS candidate) ---
         if 'collector_id' in channel and channel['collector_id'] in [55] and channel.get("collect_url"):
@@ -581,36 +866,21 @@ class NewsCollector:
                 channel, channel["connection_mode"]
             )
             if connect_error:
-                if unittest:
-                    return False
-                self.logger.warning(f'FAILED find collect_elements on {site}')
-                report["failed_log"] = "FAILED find collect_elements"
-                report["status"] = 2
-                return channel, report, None
+                return await self._after_html_fail(
+                    report, channel, site, "connect:html_fetch", unittest
+                )
             if not channel.get("collect_url"):
-                if unittest:
-                    return False
-                self.logger.warning(f'FAILED find collect_url {site}')
-                report["failed_log"] = "FAILED find collect_url"
-                report["status"] = 3
-                return channel, report, None
+                return await self._after_html_fail(
+                    report, channel, site, "collect_items", unittest
+                )
             items = await self.get_items_pid55(
                 channel["connection_mode"], channel["collect_url"], channel["collect_elements"]
             )
 
         new_data, _ = await self._items_to_news(items, channel, site)
         if len(new_data) < MIN_MAP_NEWS:
-            if unittest:
-                return False
-            if not items:
-                self.logger.warning(f'FAILED collect items on {site}')
-                report["failed_log"] = "FAILED collect items"
-                report["status"] = 3
-            else:
-                self.logger.warning(f'FAILED collected news on {site} {len(new_data)}')
-                report["failed_log"] = f"FAILED collect news ({len(new_data)})"
-                report["status"] = 3
-            return channel, report, None
+            kind = "collect_items" if not items else f"collect_news:{len(new_data)}"
+            return await self._after_html_fail(report, channel, site, kind, unittest)
         if unittest:
             return True
         return channel, report, new_data
@@ -741,6 +1011,9 @@ class NewsCollector:
             item_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, re.sub("https*://", "", link)))
         #print(f'link {link}\ntitle {title}\npubdate ')
         # D.3: pubdate optional on HTML listing — keep title+link; date may appear later.
+        # LLM collector path: date still mandatory on listing (until article-page date parse exists).
+        if channel.get("_require_listing_date") and not pubdate:
+            return None
         if link and title:
             collect_date = int(tm.mktime(datetime.datetime.now().timetuple()))
             published = check_time(pubdate) if pubdate else collect_date

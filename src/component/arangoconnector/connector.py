@@ -4,6 +4,7 @@ from configparser import ConfigParser
 import component.metrics as metrics
 import os
 from loguru import logger
+from common.utils import http_user_agent
 
 def get_plug():
     return {
@@ -106,6 +107,9 @@ class ArangoConnector:
             # metrics/inc_successfully отключены — ломали прогон (ASGI/aioprometheus)
 
         channel["report"] = report
+        ua = http_user_agent()
+        if ua:
+            channel["user_agent"] = ua
         try:
             # _rev от concurrent update часто даёт ArangoServerError → не pickle'ится в Pool
             channel.pop("_rev", None)

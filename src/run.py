@@ -31,7 +31,15 @@ from dotenv import load_dotenv
 
 
 load_dotenv()
-if os.getenv('DEBUG') != True:
+
+
+def _env_flag(name: str) -> bool:
+    return (os.getenv(name) or "").strip().lower() in ("1", "true", "yes")
+
+
+DEBUG_MODE = _env_flag("DEBUG")
+
+if not DEBUG_MODE:
     config = ConfigParser()
     config.read("src/config/config.ini")
     dsn = config["Sentry"]['dsn']
@@ -72,9 +80,9 @@ def _is_connect_error(exc: BaseException, ex_traceback: str) -> bool:
 def get_report(channel):
     # ++++++ status code ++++++
     # 1 - SUCCESSFULLY
-    # 2 - FAILED (не получилось найти целевые элементы для коллектора *в основном это связанно с ошибками коннекта)
+    # 2 - FAILED (не получилось найти целевые элементы коллектора)
     # 3 - FAILED (не получилось сколлектить целевые элементы)
-    # 4 - FAILED (ошибки коннекта к сайту)
+    # 4 - FAILED (сайт не вернул HTTP-ответ / сеть; не ошибка карты)
     # 5 - FAILED (не получилось найти целевой элемент для парсера)
     # 6 - FAILED (не получилось спарсить новости по целевым элементам)
     # unexpected exceptions → failed_log prefix MAP ASSEMBLY ERROR (status остаётся null, если не выставлен ниже)
@@ -103,8 +111,15 @@ async def buf_proceses(cpu_id, shm_name):
             if shm.buf[0] == cpu_id:
                 arango_conn = ArangoConnector()
                 channels = arango_conn.get_news_channels()
+                # Пустая очередь новых (null) → ретрай failed (map_assembly_status=3).
+                # Раньше в DEBUG ретрай отключали; для ночных/локальных прогонов снова включён.
                 if not channels:
                     channels = arango_conn.get_news_channels(failed_channels=True)
+                    if channels:
+                        logger.info(
+                            f"[map_feed] step=queue retry_failed n={len(channels)} "
+                            f"debug={int(DEBUG_MODE)}"
+                        )
                 proxy_pool = arango_conn.get_proxy_pool()
                 shm.buf[0] = 0
                 return channels, proxy_pool, arango_conn
@@ -123,7 +138,7 @@ def get_connection_mode(channel, proxy_pool):
         report["used_connections"] = []
         channel["report"] = report
         proxy_pool_filter = proxy_pool
-    return list(proxy_pool_filter)[0] if proxy_pool_filter else "tor"
+    return list(proxy_pool_filter)[0] if proxy_pool_filter else "default"
 
 async def create_map_for_collector(channel, collector_mapper, report):
     channel['parser_id'] = 55
@@ -271,7 +286,10 @@ if __name__ == "__main__":
     config = _read_mapper_config()
     proceses = resolve_pool_size(config)
     api_workers = resolve_api_workers(config)
-    logger.info(f"Starting mapper pool with {proceses} worker(s), api_workers={api_workers}")
+    logger.info(
+        f"Starting mapper pool with {proceses} worker(s), api_workers={api_workers} "
+        f"debug={int(DEBUG_MODE)}"
+    )
     np = ArangoConnector()
     api_startup(api_workers=api_workers)
     # 1 воркер: без Pool — иначе ArangoServerError при unpickle роняет _handle_results и прогон зависает

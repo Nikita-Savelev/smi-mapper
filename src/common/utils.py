@@ -26,17 +26,51 @@ def load_pkl(filename):
     with open(filename, 'rb') as inp:
         return pickle.load(inp)
 
+# Один UA на процесс: fake_useragent.chrome каждый вызов случайный (часто Android),
+# сайты отдают другую вёрстку — карта с одного HTML, items с другого = 0 новостей.
+_DESKTOP_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+_CACHED_HTTP_HEADERS = None
+
+
+def _stable_http_headers():
+    global _CACHED_HTTP_HEADERS
+    if _CACHED_HTTP_HEADERS is not None:
+        return dict(_CACHED_HTTP_HEADERS)
+    ua_str = None
+    try:
+        ua = UserAgent()
+        for _ in range(8):
+            cand = ua.chrome
+            if cand and not re.search(r"Android|iPhone|iPad|Mobile", cand, re.I):
+                ua_str = cand
+                break
+    except Exception:
+        pass
+    _CACHED_HTTP_HEADERS = {"User-Agent": ua_str or _DESKTOP_CHROME_UA}
+    return dict(_CACHED_HTTP_HEADERS)
+
+
+def http_user_agent():
+    """UA, которым этот процесс mapper ходит на сайт (один на процесс)."""
+    return _stable_http_headers().get("User-Agent")
+
+
 def get_connection_options(connection_mode, response_type=ProxyConnector):
-    ua = UserAgent()
-    headers = {'User-Agent': ua.chrome}
+    headers = _stable_http_headers()
     if connection_mode == "default":
         connector = None
+    # TOR отключён: socks5 127.0.0.1:9050 сейчас не работает как надо.
+    # elif connection_mode == "tor":
+    #     url = f"""socks5://{f'{str(random.randint(10000, 2147483647))}:passwrd'}@127.0.0.1:9050"""
+    #     if response_type == ProxyConnector:
+    #         connector = ProxyConnector.from_url(url)
+    #     elif response_type == str:
+    #         connector = url
     elif connection_mode == "tor":
-        url = f"""socks5://{f'{str(random.randint(10000, 2147483647))}:passwrd'}@127.0.0.1:9050"""
-        if response_type == ProxyConnector:
-            connector = ProxyConnector.from_url(url)
-        elif response_type == str:
-            connector = url
+        connector = None
     else:
         url = f'http://{connection_mode}'
         if response_type == ProxyConnector:
