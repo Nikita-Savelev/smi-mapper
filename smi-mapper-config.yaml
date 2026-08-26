@@ -3,7 +3,7 @@ apiVersion: v1
 metadata:
   name: smi-config-mapper
   namespace: dataspace
-data: 
+data:
   config.ini: |
     [NewsCollector]
     mode = auto
@@ -12,14 +12,26 @@ data:
     [NewsParser]
     semaphore = 4
 
-    [Arango]
-    arangoURL = http://158.160.42.54:8529
-    username = root
-    password = infoprofile
-    db_name = infoprofile
-    collection_channels_name = tmp_channels
-    collection_proxy_name = smi_proxy
-    
-    [Sentry]
-    dsn = https://b74c52888ac72c34f4ef141370c53397@o4506745820348416.ingest.sentry.io/4506752175374336
+    [Workers]
+    workers = auto
+    api_workers = 2
 
+    [Arango]
+    arangoURL =
+    username =
+    password =
+    db_name =
+    collection_channels_name =
+    collection_proxy_name =
+
+    [Sentry]
+    dsn =
+
+    [LLM]
+    enabled = false
+    api_key =
+    base_url = https://api.openai.com/v1
+    model = gpt-4o-mini
+    top_k = 5
+    max_home_links = 150
+    timeout_sec = 90

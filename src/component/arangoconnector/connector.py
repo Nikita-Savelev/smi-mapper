@@ -113,11 +113,36 @@ class ArangoConnector:
         try:
             # _rev от concurrent update часто даёт ArangoServerError → не pickle'ится в Pool
             channel.pop("_rev", None)
-            self.collection_channels.update(channel)
+            self.collection_channels.update(channel, check_rev=False)
         except Exception as ex:
             # не пробрасываем arango.* наружу: multiprocessing.Pool ломается на unpickle
             logger.warning(
                 f'Failed Arango update for {channel.get("url")}: '
+                f'{type(ex).__name__}: {ex}'
+            )
+            # иначе канал остаётся в busy (2) навсегда и больше не берётся в очередь
+            self._release_busy_lock(channel)
+
+    def _release_busy_lock(self, channel: dict) -> None:
+        """Сброс map_assembly_status=2 → null, если финальная запись карты не удалась."""
+        key = channel.get("_key")
+        if not key:
+            return
+        try:
+            self.aql_execute(
+                f'FOR d IN {self.collection_channels_name} '
+                f'FILTER d._key == @key AND d.map_assembly_status == 2 '
+                f'UPDATE d WITH {{ "map_assembly_status": null }} IN {self.collection_channels_name} '
+                f'OPTIONS {{ ignoreRevs: true }} '
+                f'RETURN NEW._key',
+                bind_vars={"key": key},
+            )
+            logger.warning(
+                f'Released busy lock (status 2→null) for {channel.get("url")} key={key}'
+            )
+        except Exception as ex:
+            logger.error(
+                f'Failed to release busy lock for {channel.get("url")}: '
                 f'{type(ex).__name__}: {ex}'
             )
 
